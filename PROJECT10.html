@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ART&TECH — Screening Loop</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: black; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass }     from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass }from "three/addons/postprocessing/UnrealBloomPass.js";
+import { ShaderPass }     from "three/addons/postprocessing/ShaderPass.js";
+
+/* =========================================================
+   WORDS  (ART&TECH is always last)
+   ========================================================= */
+
+const WORD_POOL = [
+  { word: "CREATIVITY",    color: [1.0, 0.52, 0.3]  },  
+  { word: "VISION",        color: [0.0, 0.75, 1.0]  },  
+  { word: "DESIGN",        color: [1.0, 0.18, 0.72] },  
+  { word: "INNOVATION",    color: [1.0, 0.82, 0.3]  },  
+  { word: "EXPRESSION",    color: [0.92, 0.15, 1.0] },  
+  { word: "DATA",          color: [1.0, 0.08, 0.42] }, 
+  { word: "SOUND",         color: [1.0, 0.72, 0.0]  },  
+  { word: "ALGORITHM",     color: [0.9, 0.6, 0.1]  },  
+  { word: "IMMERSION",     color: [1.0, 0.18, 0.58] },  
+  { word: "STORY",  color: [1.0, 0.3, 0.9]  },  
+
+];
+
+const ARTTECH   = { word: "ART&TECHNOLOGY", color: [1.0, 0.25, 0.95] };
+const ALL_DIRS  = ["ltr", "ltr", "ttb"];
+
+const DUR = {
+  INTRO_SCATTER: 1.8,   // letters fly outward
+  INTRO_RETURN:  3.2,   // letters fly back and settle
+  REVEAL:        1.4,
+  HOLD:          1.8,
+  FADE:          0.7,
+  HOLD_FINAL:    7.0,
+  FADE_FINAL:    2.5,
+  FINAL_PAUSE:   1.0,
+};
+
+const ROWS = 15;
+const COLS = 31;
+const CELL = 0.62;
+const GAP  = 0.18;
+const CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&@#%*";
+
+/* =========================================================
+   CUSTOM POST SHADER  — chromatic aberration + vignette + grain
+   ========================================================= */
+const postShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime:    { value: 0 },
+    uAberr:   { value: 0.0012 },  // RGB split radius
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    precision highp float;
+    varying vec2 vUv;
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform float uAberr;
+
+    float random(vec2 st) {
+      return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453);
+    }
+
+    void main() {
+      vec2  uv     = vUv;
+      vec2  center = uv - 0.5;
+      float dist   = length(center);
+
+      // chromatic aberration: R pushed outward, B inward, G stays
+      float str = uAberr * (1.0 + dist * dist * 1.5);
+      vec2  dir = normalize(center + 0.0001) * str;
+      float r = texture2D(tDiffuse, uv + dir      ).r;
+      float g = texture2D(tDiffuse, uv            ).g;
+      float b = texture2D(tDiffuse, uv - dir      ).b;
+
+      vec3 col = vec3(r, g, b);
+
+      // film grain — changes every frame, very subtle
+      col += (random(uv + fract(uTime * 0.07)) * 0.06 - 0.03);
+
+      // vignette — darkens edges, leaving center untouched
+      float vig = 0.82 + 0.18 * (1.0 - smoothstep(0.48, 0.88, dist));
+      col = clamp(col * vig, 0.0, 1.0);
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+};
+
+/* =========================================================
+   SCENE + RENDERER
+   ========================================================= */
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.OrthographicCamera(
+  -COLS*(CELL+GAP)/2,  COLS*(CELL+GAP)/2,
+   ROWS*(CELL+GAP)/2, -ROWS*(CELL+GAP)/2,
+  0.1, 100
+);
+camera.position.z = 20;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.9, 0.10, 0.18  // radius 0.10 — tight glow around each letter, doesn't spread to neighbours
+);
+composer.addPass(bloomPass);
+const postPass = new ShaderPass(postShader);
+composer.addPass(postPass);
+
+/* =========================================================
+   SHADERS
+   ========================================================= */
+const vertexShader = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+  }
+`;
+
+// uIsWord = 1 → word letter mesh (no LED-aura frame around it)
+// uIsWord = 0 → chaos background cell (LED-aura visible)
+const letterFrag = `
+  precision highp float;
+  varying vec2 vUv;
+  uniform sampler2D uTexture;
+  uniform float uBrightness;
+  uniform float uTime;
+  uniform float uSeed;
+  uniform vec3  uColor;
+  uniform float uIsWord;
+  uniform float uReveal;   // 0 = just spawned, 1 = fully settled
+
+  float random(vec2 st) {
+    return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+  }
+
+  void main() {
+    // UV distortion: letter materialises from static — pow(3) decays fast
+    // so letter is readable for most of the reveal, only briefly distorted
+    float distStr = uIsWord * pow(max(0.0, 1.0 - uReveal), 3.0);
+    vec2 uvd = vUv;
+    uvd.x += distStr * 0.07 * sin(vUv.y * 22.0 + uTime * 9.0 + uSeed);
+    uvd.y += distStr * 0.04 * sin(vUv.x * 17.0 + uTime * 7.0 + uSeed * 1.9);
+
+    vec4  tex        = texture2D(uTexture, clamp(uvd, 0.0, 1.0));
+    float softLetter = smoothstep(0.08, 1.0, tex.a);
+    float ledGlow    = smoothstep(0.65, 0.05, length(vUv - 0.5));
+
+    float scanline = 0.88 + sin(vUv.y * 90.0 + uTime * 2.0) * 0.12;
+    float noise    = 0.92 + random(vUv * 50.0 + uTime + uSeed) * 0.10;
+    float flicker  = 1.0
+      + 0.07 * sin(uTime * 18.0 + uSeed * 4.0)
+      + 0.04 * sin(uTime * 41.0 + uSeed * 9.0);
+    float breath   = 1.0 + 0.05 * sin(uTime * 2.5 + uSeed);
+
+    // chaos cells: full texture treatment (scanline, noise, flicker)
+    // word cells: clean core — no grain so letter shape stays crisp
+    float chaosCore = softLetter * uBrightness * flicker * scanline * noise;
+    float wordCore  = softLetter * uBrightness * breath;
+    float core = mix(chaosCore, wordCore, uIsWord);
+
+    float aura = ledGlow * uBrightness * 0.22 * (1.0 - uIsWord);
+
+    float alpha = clamp(core + aura, 0.0, 1.0);
+    vec3  col   = mix(uColor, vec3(1.0, 0.95, 1.0), core * 0.12);
+    col += uColor * aura * 1.2;
+
+    gl_FragColor = vec4(col, alpha);
+  }
+`;
+
+// panel vertex shader — passes world-space XY so dot density is
+// independent of the panel's geometry size
+const panelVertShader = `
+  varying vec2 vWorldPos;
+  void main() {
+    vec4 wp   = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xy;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+
+const panelFrag = `
+  precision highp float;
+  varying vec2 vWorldPos;
+  uniform float uTime;
+  uniform vec3  uTint;
+
+  float random(vec2 st) {
+    return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453123);
+  }
+
+  void main() {
+    // 0.80 = CELL + GAP — dots align with the character cell grid
+    vec2  grid  = fract(vWorldPos / 0.80);
+    vec2  cellId = floor(vWorldPos / 0.80);
+    float dot   = smoothstep(0.40, 0.06, length(grid - 0.5));
+    float n     = random(cellId + floor(uTime * 1.5));
+    vec3  base  = vec3(0.002, 0.003, 0.020);
+    gl_FragColor = vec4(base + uTint * dot * n * 0.14, 1.0);
+  }
+`;
+
+/* =========================================================
+   PANEL
+   ========================================================= */
+const panelW = COLS * (CELL + GAP);
+const panelH = ROWS * (CELL + GAP);
+const panelMat = new THREE.ShaderMaterial({
+  vertexShader: panelVertShader, fragmentShader: panelFrag,
+  uniforms: { uTime: { value: 0 }, uTint: { value: new THREE.Color(0, 0.15, 0.2) } }
+});
+// 200×200 covers any screen size; dots stay correct because panelFrag uses world coords
+const panel = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), panelMat);
+panel.position.z = -0.4;
+scene.add(panel);
+
+/* =========================================================
+   UTILS
+   ========================================================= */
+const texCache = new Map();
+function letterTex(ch) {
+  if (texCache.has(ch)) return texCache.get(ch);
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 256;
+  const cx = cv.getContext("2d");
+  cx.clearRect(0, 0, 256, 256);
+  cx.textAlign = "center"; cx.textBaseline = "middle";
+  cx.font = "bold 150px Arial Black, Impact, sans-serif";
+  cx.shadowColor = "white"; cx.shadowBlur = 16;
+  cx.fillStyle = "white";
+  cx.fillText(ch, 128, 132);
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.needsUpdate = true;
+  texCache.set(ch, t);
+  return t;
+}
+function rndChar()    { return CHARACTERS[Math.floor(Math.random() * CHARACTERS.length)]; }
+function mkColor(c)   { return new THREE.Color(c[0], c[1], c[2]); }
+function ss(e0,e1,x)  { const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0))); return t*t*(3-2*t); }
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length-1; i > 0; i--) {
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]] = [a[j],a[i]];
+  }
+  return a;
+}
+
+/* =========================================================
+   CHAOS BACKGROUND GRID  (chars only — never shows word letters)
+   ========================================================= */
+const ox = -((COLS-1)*(CELL+GAP))/2;
+const oy =  ((ROWS-1)*(CELL+GAP))/2;
+const cellGeo = new THREE.PlaneGeometry(CELL, CELL);
+const bgCells = [];
+
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    const ch  = rndChar();
+    const mat = new THREE.ShaderMaterial({
+      vertexShader, fragmentShader: letterFrag,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: {
+        uTexture: { value: letterTex(ch) }, uBrightness: { value: 0 },
+        uTime:    { value: 0 },             uSeed:       { value: Math.random()*100 },
+        uColor:   { value: new THREE.Color(0, 0.85, 1) }, uIsWord: { value: 0 },
+        uReveal:  { value: 1 }   // bg cells: no distortion
+      }
+    });
+    const mx = ox + c*(CELL+GAP), my = oy - r*(CELL+GAP);
+    const mesh = new THREE.Mesh(cellGeo, mat);
+    mesh.position.set(mx, my, 0);
+    scene.add(mesh);
+    // fully random scatter direction (not radial) + random appear delay = staggered spawn
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 4 + Math.random() * 13;
+    bgCells.push({ mat, mesh, char: ch, seed: Math.random()*100,
+      flickerSpeed: 2.5 + Math.random()*6.5, lastChange: 0,
+      originX: mx, originY: my,
+      scatterX: mx + Math.cos(ang)*spd, scatterY: my + Math.sin(ang)*spd,
+      spawnDelay: Math.random() * 1.2 });
+  }
+}
+
+const cyanC = new THREE.Color(0, 0.85, 1.0);
+
+function chaosBright(cell, t) {
+  const a = Math.sin(t * cell.flickerSpeed + cell.seed);
+  const b = Math.sin(t * cell.flickerSpeed * 0.37 + cell.seed * 2);
+  let v = Math.pow(a*b*0.5+0.5, 3.2);
+  return v * (Math.sin(t*1.5 + cell.seed*0.7) > -0.15 ? 1 : 0);
+}
+
+/* =========================================================
+   WORD PLACEMENT  (each direction maps to real grid coords)
+   ========================================================= */
+function wordCells(word, dir) {
+  const len = word.length;
+  const mr  = Math.floor(ROWS/2);
+  const mc  = Math.floor(COLS/2);
+  const out = [];
+  switch (dir) {
+    case "ttb": {
+      const margin = 1;
+      const maxR = Math.max(0, ROWS - len - margin * 2);
+      const r0 = margin + Math.floor(Math.random() * (maxR + 1));
+      const c  = margin + Math.floor(Math.random() * (COLS - margin * 2));
+      for (let i=0;i<len;i++) out.push({r:r0+i, c, ci:i}); break;
+    }
+    case "center": {
+      const c0 = Math.floor((COLS - len) / 2);
+      for (let i=0;i<len;i++) out.push({r:mr, c:c0+i, ci:i}); break;
+    }
+    case "ltr": default: {
+      const margin = 1;
+      const maxC = Math.max(0, COLS - len - margin * 2);
+      const c0 = margin + Math.floor(Math.random() * (maxC + 1));
+      const r  = margin + Math.floor(Math.random() * (ROWS - margin * 2));
+      for (let i=0;i<len;i++) out.push({r, c:c0+i, ci:i}); break;
+    }
+  }
+  return out;
+}
+
+/* =========================================================
+   WORD LAYER — each word gets its own letter meshes (z = 0.1)
+   No shared grid cells → no frame overlap
+   ========================================================= */
+const softW = new THREE.Color(1.0, 0.94, 1.0);
+
+class WordLayer {
+  constructor(entry, dir, t, isFinal=false) {
+    this.col     = entry.color;
+    this.hold    = isFinal ? DUR.HOLD_FINAL : DUR.HOLD;
+    this.fadeDur = isFinal ? DUR.FADE_FINAL : DUR.FADE;
+    this.phase   = "reveal";
+    this.pt      = t;
+    this.done    = false;
+    this.letters = [];
+
+    const word = entry.word;
+    const len  = word.length;
+    wordCells(word, dir).forEach(wc => {
+      // ltr: letters reveal left-to-right 
+      let d = wc.ci / Math.max(len-1, 1);
+      d = Math.max(0, Math.min(1, d + Math.random()*0.08 - 0.04));
+
+      const mat = new THREE.ShaderMaterial({
+        vertexShader, fragmentShader: letterFrag,
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTexture: { value: letterTex(word[wc.ci]) }, uBrightness: { value: 0 },
+          uTime:    { value: 0 },   uSeed:    { value: Math.random()*100 },
+          uColor:   { value: mkColor(entry.color) },   uIsWord:  { value: 1 },
+          uReveal:  { value: 0 }
+        }
+      });
+      const mesh = new THREE.Mesh(cellGeo, mat);
+      mesh.position.set(ox + wc.c*(CELL+GAP), oy - wc.r*(CELL+GAP), 0.1);
+      scene.add(mesh);
+      this.letters.push({ mesh, mat, ci: wc.ci, d });
+    });
+  }
+
+  update(t) {
+    if (this.done) return true;
+    const lt = t - this.pt;
+
+    if      (this.phase === "reveal" && lt > DUR.REVEAL)   { this.phase="hold";  this.pt=t; }
+    else if (this.phase === "hold"   && lt > this.hold)    { this.phase="fade";  this.pt=t; }
+    else if (this.phase === "fade"   && lt > this.fadeDur) { this.done=true; this._free(); return true; }
+
+    const pLt = t - this.pt;
+    const wc  = mkColor(this.col);
+    const sw  = 0.45;
+
+    this.letters.forEach(({ mat, ci, d }) => {
+      mat.uniforms.uTime.value = t;
+      mat.uniforms.uColor.value.copy(wc.clone().lerp(softW, 0.18));
+
+      if (this.phase === "reveal") {
+        const start = d*(1-sw);
+        const rev   = ss(start, start+sw, pLt/DUR.REVEAL);
+        mat.uniforms.uBrightness.value = rev * (0.92 + 0.08*Math.sin(t*6+ci)) * 0.85;
+        mat.uniforms.uReveal.value     = rev;  // drives UV distortion settle
+
+      } else if (this.phase === "hold") {
+        mat.uniforms.uBrightness.value = 0.80 + 0.08*Math.sin(t*2.8 + ci*0.6);
+        mat.uniforms.uReveal.value     = 1.0;
+
+      } else if (this.phase === "fade") {
+        const fo = 1 - ss(0, this.fadeDur, pLt);
+        mat.uniforms.uBrightness.value = (0.80 + 0.08*Math.sin(t*2.8 + ci*0.6)) * fo;
+        mat.uniforms.uReveal.value     = 1.0;
+      }
+    });
+    return false;
+  }
+
+  _free() {
+    this.letters.forEach(({ mesh, mat }) => { scene.remove(mesh); mat.dispose(); });
+    this.letters = [];
+  }
+}
+
+/* =========================================================
+   SEQUENCE CONTROLLER
+   rush → pause → final → loop
+   ========================================================= */
+let spawnQ    = [];   // { entry, dir, t }
+let layers    = [];   // active WordLayers
+let seqState  = "intro";
+let pauseT    = null;
+let finalL    = null;
+let panelTint = new THREE.Color(0, 0.15, 0.2);
+
+function buildSchedule(t0) {
+  const selected = shuffle([...WORD_POOL]).slice(0, 12);
+  spawnQ = [];
+  let t  = t0 + 0.5;
+  // sequential: next word spawns as previous enters its fade phase
+  // so each word is alone on screen during its full hold time (≥ 1.5 s)
+  for (const entry of selected) {
+    spawnQ.push({
+      entry,
+      dir: ALL_DIRS[Math.floor(Math.random() * ALL_DIRS.length)],
+      t
+    });
+    t += DUR.REVEAL + DUR.HOLD; // = 3.2 s between spawns
+  }
+}
+
+let chaosLevel = 0.0;
+
+/* =========================================================
+   ANIMATE
+   ========================================================= */
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const time = clock.getElapsedTime();
+
+  camera.position.x = Math.sin(time * 0.18) * 0.14;
+  camera.position.y = Math.sin(time * 0.13) * 0.10;
+  camera.lookAt(0, 0, 0);
+
+  /* ---- INTRO: letters appear staggered, scatter, then reassemble ---- */
+  if (seqState === "intro") {
+    const scatterEnd = DUR.INTRO_SCATTER;
+    const returnEnd  = scatterEnd + DUR.INTRO_RETURN;
+
+    bgCells.forEach(cell => {
+      const m = cell.mat;
+      m.uniforms.uTime.value = time;
+
+      const localT = time - cell.spawnDelay; 
+
+      let px, py, bright;
+
+      if (localT <= 0) {
+        px = cell.originX; py = cell.originY; bright = 0;
+
+      } else if (time <= scatterEnd) {
+        // scatter phase: ease-in from origin toward scatter destination
+        const dur = Math.max(scatterEnd - cell.spawnDelay, 0.01);
+        const p   = ss(0, dur, localT);
+        px = cell.originX + (cell.scatterX - cell.originX) * p;
+        py = cell.originY + (cell.scatterY - cell.originY) * p;
+        // fade in over first 0.35s, then normal flicker
+        const fadeIn = Math.min(1, localT / 0.35);
+        bright = fadeIn * (0.22 + 0.18 * Math.pow(
+          Math.sin(time * cell.flickerSpeed + cell.seed) * 0.5 + 0.5, 2));
+
+      } else {
+        // return phase: ease-out cubic back to origin
+        const rt    = Math.min(1, (time - scatterEnd) / DUR.INTRO_RETURN);
+        const eased = 1 - Math.pow(1 - rt, 3);
+        px = cell.scatterX + (cell.originX - cell.scatterX) * eased;
+        py = cell.scatterY + (cell.originY - cell.scatterY) * eased;
+        // last 35% of return: blend brightness toward what the main loop will show
+        // → no visible cut when intro hands off to rush
+        const introBright = 0.22 + 0.16 * Math.pow(
+          Math.sin(time * cell.flickerSpeed + cell.seed) * 0.5 + 0.5, 2);
+        const chaosTarget = chaosBright(cell, time) * 0.42;
+        const blendT      = Math.max(0, (rt - 0.65) / 0.35);
+        bright = introBright * (1 - blendT) + chaosTarget * blendT;
+      }
+
+      cell.mesh.position.x = px;
+      cell.mesh.position.y = py;
+
+      if (time - cell.lastChange > 0.07 + Math.random() * 0.06) {
+        const nc = rndChar();
+        cell.char = nc; m.uniforms.uTexture.value = letterTex(nc);
+        cell.lastChange = time;
+      }
+      m.uniforms.uColor.value.copy(cyanC);
+      m.uniforms.uBrightness.value = bright;
+    });
+
+    panelMat.uniforms.uTime.value = time;
+    postPass.uniforms.uTime.value  = time;
+    // aberration high during scatter, settles by end of return
+    const abT = Math.max(0, Math.min(1, (time - scatterEnd) / DUR.INTRO_RETURN));
+    postPass.uniforms.uAberr.value = 0.0045 - 0.0027 * abT;
+
+    if (time >= returnEnd) {
+      bgCells.forEach(c => c.mesh.position.set(c.originX, c.originY, 0));
+      chaosLevel = 0.42; // matches brightness intro was showing at handoff moment
+      seqState = "rush";
+      buildSchedule(time);
+    }
+
+    composer.render();
+    return;
+  }
+
+  // spawn queued words
+  while (spawnQ.length > 0 && time >= spawnQ[0].t) {
+    const s = spawnQ.shift();
+    layers.push(new WordLayer(s.entry, s.dir, time));
+    panelTint = mkColor(s.entry.color).multiplyScalar(0.15);
+  }
+
+  // update + prune
+  layers = layers.filter(l => !l.update(time));
+
+  // sequence state machine
+  if (seqState === "rush" && spawnQ.length === 0 && layers.length === 0) {
+    seqState = "pause";
+    pauseT   = time;
+  }
+  if (seqState === "pause" && time - pauseT >= DUR.FINAL_PAUSE) {
+    seqState = "final";
+    finalL   = new WordLayer(ARTTECH, "center", time, true);
+    layers.push(finalL);
+    panelTint = mkColor(ARTTECH.color).multiplyScalar(0.15);
+  }
+  if (seqState === "final" && finalL && finalL.done) {
+    seqState = "done";
+  }
+  if (seqState === "done") {
+    seqState = "rush";
+    finalL   = null;
+    buildSchedule(time);
+  }
+
+  // panel tint
+  panelMat.uniforms.uTime.value = time;
+  panelMat.uniforms.uTint.value.lerp(panelTint, 0.015);
+
+  // post-pass: aberration pulses stronger during rush, settles during finale
+  postPass.uniforms.uTime.value  = time;
+  postPass.uniforms.uAberr.value = seqState === "final"
+    ? 0.0018 + 0.0005 * Math.sin(time * 0.4)
+    : 0.0038 + 0.0022 * Math.abs(Math.sin(time * 0.55));
+
+  // chaos stays visible but word letters bloom much harder
+  // thanks to the raised bloom threshold (0.18) separating them
+  const targetChaos = (seqState === "final" || seqState === "pause")
+    ? 0.0
+    : layers.length > 0 ? 0.25 : 0.42;
+  chaosLevel += (targetChaos - chaosLevel) * 0.032;
+
+  bgCells.forEach(cell => {
+    const m = cell.mat;
+    m.uniforms.uTime.value = time;
+    if (time - cell.lastChange > 0.08 + Math.random()*0.06) {
+      const nc = rndChar();
+      if (cell.char !== nc) { cell.char = nc; m.uniforms.uTexture.value = letterTex(nc); }
+      cell.lastChange = time;
+    }
+    m.uniforms.uColor.value.copy(cyanC);
+    m.uniforms.uBrightness.value = chaosBright(cell, time) * chaosLevel;
+  });
+
+  composer.render();
+}
+animate();
+
+/* =========================================================
+   RESIZE
+   ========================================================= */
+function resize() {
+  const a    = window.innerWidth / window.innerHeight;
+  const gw   = panelW;          // grid world width  ≈ 24.8
+  const gh   = panelH;          // grid world height ≈ 12.0
+  const gAsp = gw / gh;         // ≈ 2.067
+
+  if (a <= gAsp) {
+    const hw = gw / 2;
+    camera.left = -hw;  camera.right = hw;
+    camera.top  =  hw / a; camera.bottom = -hw / a;
+  } else {
+    const hh = gh / 2;
+    camera.top = hh;  camera.bottom = -hh;
+    camera.left = -hh * a; camera.right = hh * a;
+  }
+
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloomPass.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener("resize", resize);
+resize();
+</script>
+</body>
+</html>
